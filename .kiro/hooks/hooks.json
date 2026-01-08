@@ -1,0 +1,16 @@
+{
+  "hooks": [
+    {
+      "id": "notify-vibe-start",
+      "name": "Notify Vibe Process Bar - Start",
+      "description": "当Kiro开始执行任务时通知Vibe Process Bar",
+      "trigger": {
+        "type": "on-agent-execution-complete"
+      },
+      "action": {
+        "type": "send-message",
+        "message": "Task started notification sent to Vibe Process Bar"
+      }
+    }
+  ]
+}

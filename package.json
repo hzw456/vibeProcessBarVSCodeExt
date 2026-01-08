@@ -1,0 +1,64 @@
+{
+  "name": "ai-status-transmission",
+  "displayName": "AI Status Transmission",
+  "description": "Auto-detect AI coding activity and notify Vibe Process Bar",
+  "version": "1.1.0",
+  "publisher": "your-publisher-name",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-repo/ai-status-transmission.git"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiStatusTransmission.start",
+        "title": "AI Status: Start"
+      },
+      {
+        "command": "aiStatusTransmission.status",
+        "title": "AI Status: Check Status"
+      }
+    ],
+    "configuration": {
+      "title": "AI Status Transmission",
+      "properties": {
+        "aiStatusTransmission.endpoint": {
+          "type": "string",
+          "default": "http://localhost:31415",
+          "description": "Vibe Process Bar API endpoint"
+        },
+        "aiStatusTransmission.charThreshold": {
+          "type": "number",
+          "default": 200,
+          "description": "Character change threshold to detect AI activity"
+        },
+        "aiStatusTransmission.idleTimeout": {
+          "type": "number",
+          "default": 5000,
+          "description": "Idle timeout in ms before completing task"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "16.x",
+    "typescript": "^5.0.4"
+  }
+}

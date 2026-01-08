@@ -1,0 +1,23 @@
+#!/bin/bash
+# Cline Hook: TaskComplete - 任务完成时通知Vibe Process Bar
+
+# 读取stdin的JSON输入
+INPUT=$(cat)
+
+# 提取任务信息
+TASK_ID=$(echo "$INPUT" | jq -r '.taskId // "unknown"')
+TOTAL_TOKENS=$(echo "$INPUT" | jq -r '.taskComplete.tokenUsage.totalTokens // 0')
+
+# 生成唯一的task_id
+VIBE_TASK_ID="cline_${TASK_ID}"
+
+# 发送完成任务请求到Vibe Process Bar
+curl -s -X POST "http://localhost:31415/api/task/complete" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"task_id\": \"${VIBE_TASK_ID}\",
+    \"total_tokens\": ${TOTAL_TOKENS}
+  }" > /dev/null 2>&1
+
+# 返回成功响应
+echo '{"cancel": false}'
