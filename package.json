@@ -1,12 +1,12 @@
 {
-  "name": "ai-status-transmission",
-  "displayName": "AI Status Transmission",
+  "name": "vibe-process-bar-ext",
+  "displayName": "Vibe Process Bar Extension",
   "description": "Auto-detect AI coding activity and notify Vibe Process Bar",
   "version": "1.1.0",
-  "publisher": "your-publisher-name",
+  "publisher": "vibeprocessbar",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-repo/ai-status-transmission.git"
+    "url": "https://github.com/your-repo/vibe-process-bar-ext.git"
   },
   "engines": {
     "vscode": "^1.74.0"

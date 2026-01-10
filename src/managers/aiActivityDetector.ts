@@ -2,18 +2,16 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 
 /**
- * AI活动检测器
+ * AI活动检测器 (重构版)
  * 
  * 状态机：
- * - IDLE: 初始状态，没有任务
- * - ARMED: 窗口失去焦点，等待AI活动（不计时）
- * - RUNNING: 检测到代码改动，AI正在工作（开始计时）
- * - ACTIVE: 窗口有焦点，任务可见但不在运行
+ * - ACTIVE: 窗口有焦点（前台），只上报 active，不检测 AI
+ * - ARMED: 窗口失去焦点（后台），上报 armed，检测 AI 编辑
  * 
- * 关键变更：上报 active_file 用于 VibeProcessBar 窗口匹配
+ * 检测到 AI 活动后：上报 start，结束上报 complete
  */
 
-type State = 'IDLE' | 'ARMED' | 'RUNNING' | 'ACTIVE';
+type State = 'ACTIVE' | 'ARMED';
 
 let outputChannel: vscode.OutputChannel;
 
@@ -27,161 +25,163 @@ function log(message: string) {
 }
 
 export class AIActivityDetector implements vscode.Disposable {
-    private state: State = 'IDLE';
+    // 状态: ACTIVE (前台) 或 ARMED (后台)
+    private state: State = 'ACTIVE';
     private disposables: vscode.Disposable[] = [];
 
+    // 基础信息
     private windowTitle = 'Unknown';
     private ideName = 'vscode';
-    private fixedTaskId: string = '';
-    private activeFile: string = '';  // 当前活动文件名，用于窗口匹配
-    private windowId: string = '';    // UUID，唯一标识每个插件实例
+    private taskId: string = '';  // Use windowId as taskId
+    private activeFile: string = '';
 
-    // 防抖：避免频繁的焦点变化导致任务被取消
-    private focusDebounceTimer: NodeJS.Timeout | null = null;
-    private readonly FOCUS_DEBOUNCE_MS = 500; // 500ms 防抖
+    // AI 运行状态
+    private aiRunning: boolean = false;
+    private sessionInsert: number = 0;
+    private sessionEvents: number = 0;
+    private taskStartTime: number = 0;
 
-    // AI 活动检测参数
-    private readonly AI_BATCH_THRESHOLD = 30;  // 单次变更超过30字符视为AI活动
-    private readonly IDLE_TIMEOUT_MS = 3000;   // 3秒无活动则认为AI完成
+    // 滑动窗口: 保存最近 1200ms 的 (timestamp, insertChars)
+    private recentInserts: Array<{ timestamp: number; insertChars: number }> = [];
+    private readonly SLIDING_WINDOW_MS = 1200;
+
+    // 超时与计时器 - 增加超时时间以减少误报
     private idleTimer: NodeJS.Timeout | null = null;
-    private lastActivityTime: number = 0;
-    private totalCharsInSession: number = 0;   // 本次会话累计字符数
+    private readonly BASE_IDLE_TIMEOUT_MS = 15000;  // 15秒基础空闲超时
+    private readonly MIN_RUN_MS = 5000;  // 最少运行5秒才能标记为完成
+
+    // 节流
+    private updateThrottleTimer: NodeJS.Timeout | null = null;
+    private readonly UPDATE_THROTTLE_MS = 1000;
+    private activeFileUpdateTimer: NodeJS.Timeout | null = null;
+    private readonly ACTIVE_FILE_THROTTLE_MS = 500;
+
+    // 心跳 - 每3秒上报状态（确保服务器重启后能快速重新连接）
+    private heartbeatTimer: NodeJS.Timeout | null = null;
+    private readonly HEARTBEAT_INTERVAL_MS = 3000;
+    private isConnected: boolean = false;
+    private lastHeartbeatSuccess: number = 0;
 
     constructor() {
         outputChannel = vscode.window.createOutputChannel('AI Status Transmission');
         outputChannel.show(true);
-        // 生成唯一的窗口 ID (UUID)
-        this.windowId = crypto.randomUUID();
-        log(`Generated window ID: ${this.windowId}`);
+        this.taskId = crypto.randomUUID();  // Use UUID as task ID
+        log(`Generated task ID: ${this.taskId}`);
         this.initialize();
     }
 
-    /**
-     * Detect the IDE type from vscode.env.appName
-     * Returns a short identifier for the IDE
-     */
     private detectIdeName(appName: string): string {
         const lowerName = appName.toLowerCase();
-
-        if (lowerName.includes('antigravity')) {
-            return 'antigravity';
-        } else if (lowerName.includes('kiro')) {
-            return 'kiro';
-        } else if (lowerName.includes('cursor')) {
-            return 'cursor';
-        } else if (lowerName.includes('windsurf')) {
-            return 'windsurf';
-        } else if (lowerName.includes('code - insiders')) {
-            return 'vscode-insiders';
-        } else if (lowerName.includes('visual studio code') || lowerName.includes('vs code')) {
-            return 'vscode';
-        } else if (lowerName.includes('vscodium')) {
-            return 'vscodium';
-        } else {
-            // Return a sanitized version of the app name
-            return appName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'unknown';
-        }
+        if (lowerName.includes('antigravity')) return 'antigravity';
+        if (lowerName.includes('kiro')) return 'kiro';
+        if (lowerName.includes('cursor')) return 'cursor';
+        if (lowerName.includes('windsurf')) return 'windsurf';
+        // Check CN version first (more specific)
+        if (lowerName.includes('codebuddy cn') || lowerName.includes('codebuddycn')) return 'codebuddycn';
+        if (lowerName.includes('codebuddy') || lowerName.includes('code buddy')) return 'codebuddy';
+        if (lowerName.includes('trae')) return 'trae';
+        if (lowerName.includes('code - insiders')) return 'vscode-insiders';
+        if (lowerName.includes('visual studio code') || lowerName.includes('vs code')) return 'vscode';
+        if (lowerName.includes('vscodium')) return 'vscodium';
+        return appName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'unknown';
     }
 
-    /**
-     * Get display-friendly IDE name for UI
-     */
     private getDisplayIdeName(): string {
         switch (this.ideName) {
-            case 'antigravity':
-                return 'Antigravity';
-            case 'kiro':
-                return 'Kiro';
-            case 'cursor':
-                return 'Cursor';
-            case 'windsurf':
-                return 'Windsurf';
-            case 'vscode':
-                return 'VS Code';
-            case 'vscode-insiders':
-                return 'VS Code Insiders';
-            case 'vscodium':
-                return 'VSCodium';
-            default:
-                return vscode.env.appName || 'IDE';
+            case 'antigravity': return 'Antigravity';
+            case 'kiro': return 'Kiro';
+            case 'cursor': return 'Cursor';
+            case 'windsurf': return 'Windsurf';
+            case 'codebuddy': return 'CodeBuddy';
+            case 'codebuddycn': return 'CodeBuddy CN';
+            case 'trae': return 'Trae';
+            case 'vscode': return 'VS Code';
+            case 'vscode-insiders': return 'VS Code Insiders';
+            case 'vscodium': return 'VSCodium';
+            default: return vscode.env.appName || 'IDE';
         }
     }
 
-    /**
-     * Get window title that matches the actual IDE window title
-     * Handles untitled windows and workspace folders
-     */
     private getWindowTitle(): string {
-        // Priority 1: Use workspace name if available (most reliable for saved projects)
-        if (vscode.workspace.name) {
-            return vscode.workspace.name;
-        }
-
-        // Priority 2: Use first workspace folder name
+        if (vscode.workspace.name) return vscode.workspace.name;
         if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
             return vscode.workspace.workspaceFolders[0].name;
         }
-
-        // Priority 3: For untitled windows, use the active editor's file name
         const activeEditor = vscode.window.activeTextEditor;
         if (activeEditor) {
             const doc = activeEditor.document;
+            // Only use filename from actual files, not output channels
+            const scheme = doc.uri.scheme;
+            if (scheme !== 'file' && scheme !== 'untitled') {
+                return 'Untitled';  // Don't use output channel names
+            }
             if (doc.isUntitled) {
-                // Untitled documents have URIs like "untitled:Untitled-1"
-                // Extract just the name part
                 const match = doc.uri.path.match(/Untitled-\d+/);
-                if (match) {
-                    return match[0];
-                }
+                if (match) return match[0];
             }
-            // Use the file name for regular files
             const fileName = doc.fileName.split('/').pop() || doc.fileName.split('\\').pop();
-            if (fileName) {
-                return fileName;
-            }
+            if (fileName) return fileName;
         }
-
-        // Fallback: Use a generic name
         return 'Untitled';
     }
 
-    /**
-     * Get current active file name for window matching
-     */
     private getActiveFileName(): string {
         const activeEditor = vscode.window.activeTextEditor;
         if (activeEditor) {
             const doc = activeEditor.document;
-            // Get just the filename without path
+            // Only return filename for actual files, not output channels, logs, etc.
+            const scheme = doc.uri.scheme;
+            if (scheme !== 'file' && scheme !== 'untitled') {
+                return '';  // Ignore output channels, extension outputs, etc.
+            }
             const fileName = doc.fileName.split('/').pop() || doc.fileName.split('\\').pop();
             return fileName || '';
         }
         return '';
     }
 
+    /**
+     * Check if we should skip reporting for this window.
+     * Skip when: no active file, window title is "Untitled" or empty, and no project path.
+     * This typically means an empty/Welcome window.
+     */
+    private shouldSkipReporting(): boolean {
+        const hasActiveFile = !!this.activeFile && this.activeFile.trim() !== '';
+        const hasValidTitle = !!this.windowTitle &&
+            this.windowTitle.trim() !== '' &&
+            this.windowTitle !== 'Untitled';
+        const hasProjectPath = vscode.workspace.workspaceFolders &&
+            vscode.workspace.workspaceFolders.length > 0;
+
+        // Skip if ALL conditions are false (empty window)
+        if (!hasActiveFile && !hasValidTitle && !hasProjectPath) {
+            log('Skipping report: empty window (no file, no project, title is Untitled)');
+            return true;
+        }
+        return false;
+    }
+
     private initialize(): void {
-        // Detect IDE name from vscode.env.appName
         const appName = vscode.env.appName || 'VS Code';
         this.ideName = this.detectIdeName(appName);
-
-        // Get window title that matches actual IDE window title
-        let workspaceName = this.getWindowTitle();
-
-        this.windowTitle = workspaceName;
-        this.fixedTaskId = `${this.ideName}_${workspaceName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        this.windowTitle = this.getWindowTitle();
         this.activeFile = this.getActiveFileName();
 
         log(`AIActivityDetector initializing...`);
         log(`Detected IDE: ${appName} -> ${this.ideName}`);
         log(`Window title: ${this.windowTitle}`);
-        log(`Fixed task ID: ${this.fixedTaskId}`);
+        log(`Task ID (UUID): ${this.taskId}`);
         log(`Active file: ${this.activeFile}`);
+
+        // 初始状态: 假设窗口有焦点
+        this.state = 'ACTIVE';
+        this.aiRunning = false;
 
         // 监听窗口焦点变化
         this.disposables.push(
             vscode.window.onDidChangeWindowState((windowState) => {
                 log(`Window state changed: focused=${windowState.focused}`);
-                this.handleWindowStateChangeDebounced(windowState.focused);
+                this.handleWindowStateChange(windowState.focused);
             })
         );
 
@@ -192,18 +192,14 @@ export class AIActivityDetector implements vscode.Disposable {
             })
         );
 
-        // 监听活动编辑器变化（更新 activeFile）
+        // 监听活动编辑器变化
         this.disposables.push(
             vscode.window.onDidChangeActiveTextEditor((editor) => {
                 if (editor) {
                     const oldFile = this.activeFile;
                     this.activeFile = this.getActiveFileName();
-                    if (oldFile !== this.activeFile) {
-                        log(`Active file changed: ${oldFile} -> ${this.activeFile}`);
-                        // 如果在 ARMED 或 RUNNING 状态，更新服务器
-                        if (this.state === 'ARMED' || this.state === 'RUNNING') {
-                            this.updateActiveFile();
-                        }
+                    if (oldFile !== this.activeFile && this.state === 'ARMED') {
+                        this.throttledUpdateActiveFile();
                     }
                 }
             })
@@ -212,272 +208,446 @@ export class AIActivityDetector implements vscode.Disposable {
         log('AIActivityDetector initialized successfully');
         log(`Current state: ${this.state}`);
         vscode.window.showInformationMessage('AI Status Transmission: Detector initialized');
-    }
 
-    private handleWindowStateChangeDebounced(focused: boolean): void {
-        // 清除之前的防抖计时器
-        if (this.focusDebounceTimer) {
-            clearTimeout(this.focusDebounceTimer);
-            this.focusDebounceTimer = null;
-        }
-
-        // 如果窗口失去焦点，立即处理（进入 ARMED）
-        if (!focused) {
-            this.handleWindowStateChange(focused);
-            return;
-        }
-
-        // 如果窗口获得焦点，延迟处理（防止快速切换）
-        this.focusDebounceTimer = setTimeout(() => {
-            this.handleWindowStateChange(focused);
-        }, this.FOCUS_DEBOUNCE_MS);
+        // 启动心跳
+        this.startHeartbeat();
+        // 立即发送一次心跳以确保启动时注册
+        this.sendHeartbeat();
     }
 
     private handleWindowStateChange(focused: boolean): void {
-        log(`handleWindowStateChange: focused=${focused}, currentState=${this.state}`);
+        log(`handleWindowStateChange: focused=${focused}, state = ${this.state}, aiRunning = ${this.aiRunning} `);
 
-        if (focused) {
-            // 窗口获得焦点
-            if (this.state === 'ARMED') {
-                // 从 ARMED 到 ACTIVE，不取消任务，只是更新状态
-                this.sendActiveNotification();
-                this.setState('ACTIVE');
-                log('Window regained focus from ARMED, now ACTIVE');
-            } else if (this.state === 'RUNNING') {
-                // 从 RUNNING 完成任务
-                this.completeTask();
-                this.setState('IDLE');
-                log('Window regained focus from RUNNING, task completed');
-            }
+        if (!focused) {
+            // 窗口失去焦点 -> ARMED
+            this.state = 'ARMED';
+            this.aiRunning = false;
+            this.resetSession();
+            this.sendArmedNotification();
+            log('Window lost focus, entering ARMED state');
         } else {
-            // 窗口失去焦点
-            if (this.state === 'IDLE') {
-                // 进入 ARMED 状态
-                this.setState('ARMED');
-                this.sendArmedNotification();
-                log('Window lost focus, entering ARMED state');
-            } else if (this.state === 'ACTIVE') {
-                // 从 ACTIVE 回到 ARMED
-                this.setState('ARMED');
-                this.sendArmedNotification();
-                log('Window lost focus from ACTIVE, back to ARMED');
+            // 窗口获得焦点 -> ACTIVE
+            this.state = 'ACTIVE';
+            this.sendActiveNotification();
+
+            if (this.aiRunning) {
+                // 后台任务未结束，立即完成
+                this.completeTask();
+                this.aiRunning = false;
+                log('Window regained focus with aiRunning=true, task completed');
             }
+
+            this.clearSessionTimers();
+            this.recentInserts = [];
+            log('Window gained focus, now ACTIVE');
+        }
+    }
+
+    private resetSession(): void {
+        this.sessionInsert = 0;
+        this.sessionEvents = 0;
+        this.recentInserts = [];
+        this.clearSessionTimers();
+    }
+
+    private clearSessionTimers(): void {
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+            this.idleTimer = null;
+        }
+        if (this.updateThrottleTimer) {
+            clearTimeout(this.updateThrottleTimer);
+            this.updateThrottleTimer = null;
+        }
+        if (this.activeFileUpdateTimer) {
+            clearTimeout(this.activeFileUpdateTimer);
+            this.activeFileUpdateTimer = null;
+        }
+    }
+
+    private clearHeartbeatTimer(): void {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+
+    // 心跳机制：每3秒上报状态，确保服务器重启后能快速重新连接
+    private startHeartbeat(): void {
+        this.heartbeatTimer = setInterval(() => {
+            // 每3秒都发送心跳，无论连接状态
+            // 这样当 vibeProcessBar 重启后，会在 3 秒内重新连接
+            const now = Date.now();
+            const timeSinceLastSuccess = now - this.lastHeartbeatSuccess;
+
+            // 如果超过 3.5 秒没有成功，标记为未连接
+            if (timeSinceLastSuccess > 3500) {
+                this.isConnected = false;
+            }
+
+            log(`Heartbeat: connected = ${this.isConnected}, lastSuccess = ${timeSinceLastSuccess}ms ago`);
+            this.sendHeartbeat();
+        }, this.HEARTBEAT_INTERVAL_MS);
+    }
+
+    private async sendHeartbeat(): Promise<void> {
+        // 根据当前状态发送对应的通知
+        if (this.state === 'ACTIVE') {
+            await this.sendActiveNotification();
+        } else {
+            await this.sendArmedNotification();
         }
     }
 
     private handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
-        if (event.document.uri.scheme !== 'file') {
+        // 仅当 state === ARMED 才处理
+        if (this.state !== 'ARMED') {
             return;
         }
 
-        let charCount = 0;
-        for (const change of event.contentChanges) {
-            charCount += change.text.length + change.rangeLength;
+        // 过滤: 只处理 file scheme (可选 untitled)
+        const scheme = event.document.uri.scheme;
+        if (scheme !== 'file' && scheme !== 'untitled') {
+            return;
         }
 
-        if (charCount === 0) return;
-
-        // 更新当前活动文件
+        // 更新活动文件
         const fileName = event.document.fileName.split('/').pop() || event.document.fileName.split('\\').pop() || '';
-        if (fileName) {
+        if (fileName && fileName !== this.activeFile) {
             this.activeFile = fileName;
+            this.throttledUpdateActiveFile();
         }
+
+        // 统计本次变更
+        let insert = 0;
+        let deleteCount = 0;
+        const segments = event.contentChanges.length;
+
+        for (const change of event.contentChanges) {
+            insert += change.text.length;
+            deleteCount += change.rangeLength;
+        }
+
+        // 无变更则跳过
+        if (insert === 0 && deleteCount === 0) {
+            return;
+        }
+
+        const now = Date.now();
+
+        // 维护 1200ms 滑动窗口
+        this.recentInserts.push({ timestamp: now, insertChars: insert });
+        this.recentInserts = this.recentInserts.filter(r => now - r.timestamp <= this.SLIDING_WINDOW_MS);
+
+        const winInsert = this.recentInserts.reduce((sum, r) => sum + r.insertChars, 0);
+        const winEvents = this.recentInserts.length;
+
+        // AI-like 判定
+        const aiLike = this.isAiLike(insert, deleteCount, segments, winInsert, winEvents);
 
         const relativePath = vscode.workspace.asRelativePath(event.document.fileName);
-        const now = Date.now();
-        this.lastActivityTime = now;
+        log(`Doc change: insert = ${insert}, delete=${deleteCount}, segments = ${segments}, winInsert = ${winInsert}, winEvents = ${winEvents}, aiLike = ${aiLike}, file = ${relativePath} `);
 
-        // 检测大批量变更（AI 特征）
-        const isLikelyAI = charCount >= this.AI_BATCH_THRESHOLD;
-
-        if (isLikelyAI) {
-            log(`🤖 AI-like change detected: ${charCount} chars in ${relativePath}`);
-            this.totalCharsInSession += charCount;
-
-            if (this.state !== 'RUNNING') {
-                // 不在 RUNNING 状态，启动任务
-                this.setState('RUNNING');
-                this.startRunningTask();
-                log('AI activity detected, transitioning to RUNNING');
-            }
-
-            // 重置空闲计时器
+        if (aiLike && !this.aiRunning) {
+            // 开始新任务
+            this.aiRunning = true;
+            this.sessionInsert = 0;
+            this.sessionEvents = 0;
+            this.taskStartTime = Date.now();
+            this.startTask();
             this.resetIdleTimer();
-        } else if (this.state === 'RUNNING') {
-            // 小变更但已在运行状态，也重置计时器
-            this.totalCharsInSession += charCount;
+            log('🤖 AI activity detected, starting task');
+        }
+
+        if (this.aiRunning) {
+            this.sessionInsert += insert;
+            this.sessionEvents += 1;
             this.resetIdleTimer();
-        } else if (this.state === 'ARMED') {
-            // 原有逻辑：在 ARMED 状态下任何变更都触发 RUNNING
-            log(`Document change in ARMED state: ${charCount} chars in ${relativePath}`);
-            this.totalCharsInSession = charCount;
-            this.setState('RUNNING');
-            this.startRunningTask();
-            this.resetIdleTimer();
+            this.throttledUpdate();
         }
     }
 
+    private isAiLike(insert: number, deleteCount: number, segments: number, winInsert: number, winEvents: number): boolean {
+        // Hard Negative (任一成立则直接否决)
+        if (insert === 0 && deleteCount > 0) {
+            // 纯删除
+            return false;
+        }
+        if (deleteCount > insert * 4 && insert < 15) {
+            // 删除占主导
+            return false;
+        }
+        if (insert < 10 && segments === 1) {
+            // 微小编辑
+            return false;
+        }
+
+        // Strong Positive (任一成立)
+        if (insert >= 40) {
+            return true;
+        }
+        if (winInsert >= 50 && winEvents >= 3) {
+            return true;
+        }
+        if (segments >= 6 && insert >= 25) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private getIdleTimeout(): number {
+        // 根据会话大小动态调整超时
+        if (this.sessionInsert >= 600) {
+            return 45000;  // 大任务: 45秒
+        } else if (this.sessionInsert >= 200) {
+            return 30000;  // 中等任务: 30秒
+        }
+        return this.BASE_IDLE_TIMEOUT_MS;  // 小任务: 15秒
+    }
+
     private resetIdleTimer(): void {
-        // 清除之前的计时器
         if (this.idleTimer) {
             clearTimeout(this.idleTimer);
         }
 
-        // 设置新的空闲计时器
+        const timeout = this.getIdleTimeout();
+        log(`Setting idle timer: ${timeout} ms(sessionInsert = ${this.sessionInsert})`);
+
         this.idleTimer = setTimeout(() => {
-            if (this.state === 'RUNNING') {
-                log(`⏱️ Idle timeout reached, completing task (${this.totalCharsInSession} total chars)`);
-                this.completeTask();
-                this.setState('IDLE');
-                this.totalCharsInSession = 0;
+            if (this.state !== 'ARMED' || !this.aiRunning) {
+                return;
             }
-        }, this.IDLE_TIMEOUT_MS);
+
+            // 检查最短运行时间
+            const runTime = Date.now() - this.taskStartTime;
+            if (runTime < this.MIN_RUN_MS) {
+                log(`Skipping complete, minRun not reached(${runTime}ms < ${this.MIN_RUN_MS}ms)`);
+                this.resetIdleTimer();
+                return;
+            }
+
+            log(`⏱️ Idle timeout reached, completing task(sessionInsert = ${this.sessionInsert}, sessionEvents = ${this.sessionEvents})`);
+            this.completeTask();
+            this.aiRunning = false;
+            this.resetSession();
+            // 保持 state = ARMED，继续后台监听
+        }, timeout);
     }
 
-    private setState(newState: State): void {
-        log(`State transition: ${this.state} -> ${newState}`);
-        this.state = newState;
+    private throttledUpdateActiveFile(): void {
+        if (this.activeFileUpdateTimer) {
+            return;
+        }
+        this.activeFileUpdateTimer = setTimeout(() => {
+            this.activeFileUpdateTimer = null;
+            this.updateActiveFile();
+        }, this.ACTIVE_FILE_THROTTLE_MS);
     }
+
+    private throttledUpdate(): void {
+        if (this.updateThrottleTimer) {
+            return;
+        }
+        this.updateThrottleTimer = setTimeout(() => {
+            this.updateThrottleTimer = null;
+            this.sendUpdateNotification();
+        }, this.UPDATE_THROTTLE_MS);
+    }
+
+    // === API Calls ===
 
     private async sendArmedNotification(): Promise<void> {
-        // Get project path
+        // Skip reporting for empty windows (no file, no project, title is Untitled)
+        this.activeFile = this.getActiveFileName();
+        if (this.shouldSkipReporting()) {
+            return;
+        }
+
         let projectPath = '';
         if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
             projectPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
         }
 
-        // 获取最新的活动文件
-        this.activeFile = this.getActiveFileName();
-
         const data: Record<string, any> = {
-            task_id: this.fixedTaskId,
-            window_id: this.windowId,  // UUID 用于精确匹配
-            name: `${this.getDisplayIdeName()} - ${this.windowTitle}`,
+            task_id: this.taskId,
+
+            name: `${this.getDisplayIdeName()} - ${this.windowTitle} `,
             ide: this.ideName,
             window_title: this.windowTitle,
             status: 'armed',
             project_path: projectPath,
         };
-        // 只有当 activeFile 非空时才发送，避免空字符串导致匹配失败
         if (this.activeFile) {
             data.active_file = this.activeFile;
         }
 
-        log(`Sending ARMED notification: ${this.fixedTaskId}, active_file: ${this.activeFile}`);
+        log(`Sending ARMED notification: ${this.taskId}, active_file: ${this.activeFile} `);
 
         try {
             await this.sendRequest('/api/task/armed', data);
-            log(`✅ ARMED notification sent: ${this.fixedTaskId}`);
+            log(`✅ ARMED notification sent: ${this.taskId} `);
         } catch (err) {
-            log(`❌ Failed to send ARMED notification: ${err}`);
+            log(`❌ Failed to send ARMED notification: ${err} `);
         }
     }
 
-    private async updateActiveFile(): Promise<void> {
-        // 如果 activeFile 为空，跳过更新
-        if (!this.activeFile) {
-            log(`Skipping active file update: no active file`);
+    private async sendActiveNotification(): Promise<void> {
+        // Skip reporting for empty windows (no file, no project, title is Untitled)
+        if (this.shouldSkipReporting()) {
             return;
         }
 
-        const data = {
-            task_id: this.fixedTaskId,
-            window_id: this.windowId,
-            active_file: this.activeFile
-        };
-
-        log(`Updating active file: ${this.activeFile}`);
-
-        try {
-            await this.sendRequest('/api/task/update', data);
-            log(`✅ Active file updated: ${this.activeFile}`);
-        } catch (err) {
-            log(`❌ Failed to update active file: ${err}`);
-        }
-    }
-
-    private async startRunningTask(): Promise<void> {
-        // Get project path
         let projectPath = '';
         if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
             projectPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
         }
 
         const data: Record<string, any> = {
-            task_id: this.fixedTaskId,
-            window_id: this.windowId,
-            name: `${this.getDisplayIdeName()} - ${this.windowTitle}`,
+            task_id: this.taskId,
+
+            name: `${this.getDisplayIdeName()} - ${this.windowTitle} `,
             ide: this.ideName,
             window_title: this.windowTitle,
+            status: 'active', // Explicit status
             project_path: projectPath,
         };
-        // 只有当 activeFile 非空时才发送
         if (this.activeFile) {
             data.active_file = this.activeFile;
         }
 
-        log(`Starting RUNNING task: ${this.fixedTaskId}, active_file: ${this.activeFile || '(none)'}`);
+        log(`Sending ACTIVE notification: ${this.taskId}, active_file: ${this.activeFile || '(none)'} `);
+
+        try {
+            // Use 'armed' endpoint or 'active' - if 'active' endpoint doesn't support full restoration on server side, 
+            // we might want to use a unified endpoint or ensure server handles it.
+            // Assuming server handles full payload on /active as well or we use /armed for everything essentially.
+            // For now, let's stick to /active but send full data so server CAN use it if improved.
+            // Wait, if 404, we want to auto-register. 
+            // If the server implementation of /api/task/active requires the task to exist, these extra fields won't help unless the server is also updated.
+            // However, based on typical patterns, passing full info allows upsert. 
+            // If strictly needed, we could call /api/task/armed even for active state? 
+            // The prompt implies "Task not found", so the SERVER is rejecting it.
+            // Let's try sending full data to /api/task/active first.
+            await this.sendRequest('/api/task/active', data);
+            log(`✅ ACTIVE notification sent: ${this.taskId} `);
+        } catch (err: any) {
+            log(`❌ Failed to send ACTIVE notification: ${err} `);
+            // If 404, maybe we should try to 'start' or 'arm' to register it?
+            if (err.message && err.message.includes('404')) {
+                log('⚠️ Task not found (404), attempting to re-register via ARMED...');
+                await this.sendArmedNotification();
+            }
+        }
+    }
+
+    private async startTask(): Promise<void> {
+        let projectPath = '';
+        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+            projectPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
+        }
+
+        const data: Record<string, any> = {
+            task_id: this.taskId,
+
+            name: `${this.getDisplayIdeName()} - ${this.windowTitle} `,
+            ide: this.ideName,
+            window_title: this.windowTitle,
+            project_path: projectPath,
+        };
+        if (this.activeFile) {
+            data.active_file = this.activeFile;
+        }
+
+        log(`Starting task: ${this.taskId}, active_file: ${this.activeFile || '(none)'} `);
 
         try {
             await this.sendRequest('/api/task/start', data);
-            log(`✅ RUNNING task started: ${this.fixedTaskId}`);
-            vscode.window.showInformationMessage(`AI Task Running: ${this.windowTitle}`);
+            log(`✅ Task started: ${this.taskId} `);
+            vscode.window.showInformationMessage(`AI Task Started: ${this.windowTitle} `);
         } catch (err) {
-            log(`❌ Failed to start RUNNING task: ${err}`);
+            log(`❌ Failed to start task: ${err} `);
         }
     }
 
     private async completeTask(): Promise<void> {
         const data = {
-            task_id: this.fixedTaskId,
-            window_id: this.windowId,
-            total_tokens: 0
+            task_id: this.taskId,
+
+            session_insert: this.sessionInsert,
+            session_events: this.sessionEvents,
         };
 
-        log(`Completing task: ${this.fixedTaskId}`);
+        log(`Completing task: ${this.taskId} (session_insert = ${this.sessionInsert}, session_events = ${this.sessionEvents})`);
 
         try {
             await this.sendRequest('/api/task/complete', data);
-            log(`✅ Task completed: ${this.fixedTaskId}`);
-            vscode.window.showInformationMessage(`AI Task Completed: ${this.windowTitle}`);
+            log(`✅ Task completed: ${this.taskId} `);
+            vscode.window.showInformationMessage(`AI Task Completed: ${this.windowTitle} `);
         } catch (err) {
-            log(`❌ Failed to complete task: ${err}`);
+            log(`❌ Failed to complete task: ${err} `);
         }
     }
 
     private async cancelTask(): Promise<void> {
         const data = {
-            task_id: this.fixedTaskId,
-            window_id: this.windowId
+            task_id: this.taskId,
+
         };
 
-        log(`Cancelling task: ${this.fixedTaskId}`);
+        log(`Cancelling task: ${this.taskId} `);
 
         try {
             await this.sendRequest('/api/task/cancel', data);
-            log(`✅ Task cancelled: ${this.fixedTaskId}`);
+            log(`✅ Task cancelled: ${this.taskId} `);
         } catch (err) {
-            log(`❌ Failed to cancel task: ${err}`);
+            log(`❌ Failed to cancel task: ${err} `);
         }
     }
 
-    private async sendActiveNotification(): Promise<void> {
-        const data: Record<string, any> = {
-            task_id: this.fixedTaskId,
-            window_id: this.windowId,
+    private async updateActiveFile(): Promise<void> {
+        if (!this.activeFile) {
+            return;
+        }
+
+        const data = {
+            task_id: this.taskId,
+
+            active_file: this.activeFile,
         };
-        // 只有当 activeFile 非空时才发送
+
+        log(`Updating active file: ${this.activeFile} `);
+
+        try {
+            await this.sendRequest('/api/task/update', data);
+            log(`✅ Active file updated: ${this.activeFile} `);
+        } catch (err) {
+            log(`❌ Failed to update active file: ${err} `);
+        }
+    }
+
+    private async sendUpdateNotification(): Promise<void> {
+        // Skip reporting for empty windows (no file, no project, title is Untitled)
+        if (this.shouldSkipReporting()) {
+            return;
+        }
+
+        const data: Record<string, any> = {
+            task_id: this.taskId,
+
+            session_insert: this.sessionInsert,
+            session_events: this.sessionEvents,
+        };
         if (this.activeFile) {
             data.active_file = this.activeFile;
         }
 
-        log(`Sending ACTIVE notification: ${this.fixedTaskId}, active_file: ${this.activeFile || '(none)'}`);
+        log(`Sending UPDATE: sessionInsert = ${this.sessionInsert}, sessionEvents = ${this.sessionEvents} `);
 
         try {
-            await this.sendRequest('/api/task/active', data);
-            log(`✅ ACTIVE notification sent: ${this.fixedTaskId}`);
+            await this.sendRequest('/api/task/update', data);
         } catch (err) {
-            log(`❌ Failed to send ACTIVE notification: ${err}`);
+            log(`❌ Failed to send update: ${err} `);
         }
     }
 
@@ -485,8 +655,8 @@ export class AIActivityDetector implements vscode.Disposable {
         return new Promise((resolve, reject) => {
             const postData = JSON.stringify(data);
 
-            log(`Sending request to: ${endpoint}`);
-            log(`Request body: ${postData}`);
+            log(`Sending request to: ${endpoint} `);
+            log(`Request body: ${postData} `);
 
             const http = require('http');
 
@@ -508,22 +678,28 @@ export class AIActivityDetector implements vscode.Disposable {
                     responseData += chunk;
                 });
                 res.on('end', () => {
-                    log(`Response: ${res.statusCode} - ${responseData}`);
+                    log(`Response: ${res.statusCode} - ${responseData} `);
                     if (res.statusCode >= 200 && res.statusCode < 300) {
+                        this.isConnected = true;  // 标记为已连接
+                        this.lastHeartbeatSuccess = Date.now();  // 更新最后成功时间
                         resolve();
                     } else {
-                        reject(new Error(`HTTP ${res.statusCode}: ${responseData}`));
+                        // 4xx/5xx 错误也标记为未连接，让心跳重试
+                        this.isConnected = false;
+                        reject(new Error(`HTTP ${res.statusCode}: ${responseData} `));
                     }
                 });
             });
 
             req.on('error', (err: Error) => {
-                log(`Request error: ${err.message}`);
+                log(`Request error: ${err.message} `);
+                this.isConnected = false;  // 标记为未连接
                 reject(err);
             });
 
             req.on('timeout', () => {
                 log('Request timeout');
+                this.isConnected = false;  // 标记为未连接
                 req.destroy();
                 reject(new Error('Request timeout'));
             });
@@ -535,17 +711,17 @@ export class AIActivityDetector implements vscode.Disposable {
 
     public dispose(): void {
         log('AIActivityDetector disposing...');
-        if (this.focusDebounceTimer) {
-            clearTimeout(this.focusDebounceTimer);
-        }
-        if (this.idleTimer) {
-            clearTimeout(this.idleTimer);
-        }
-        if (this.state === 'RUNNING') {
+        this.clearSessionTimers();
+        this.clearHeartbeatTimer();
+
+        if (this.aiRunning) {
             this.completeTask();
-        } else if (this.state === 'ARMED' || this.state === 'ACTIVE') {
-            this.cancelTask();
         }
+
+        // Always cancel task on dispose to clean up, regardless of state
+        // This ensures the old task is removed when window reloads
+        this.cancelTask();
+
         this.disposables.forEach(d => d.dispose());
         if (outputChannel) {
             outputChannel.dispose();
