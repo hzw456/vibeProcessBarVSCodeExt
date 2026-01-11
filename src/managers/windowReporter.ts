@@ -45,7 +45,6 @@ export class WindowReporter implements vscode.Disposable {
     // 心跳
     private heartbeatTimer: NodeJS.Timeout | null = null;
     private readonly HEARTBEAT_INTERVAL_MS = 3000;
-    private isConnected: boolean = false;
     private lastHeartbeatSuccess: number = 0;
 
     // 焦点变化回调
@@ -224,14 +223,10 @@ export class WindowReporter implements vscode.Disposable {
     }
 
     private startHeartbeat(): void {
+        if (this.heartbeatTimer) {
+            return; // 已经启动
+        }
         this.heartbeatTimer = setInterval(() => {
-            const now = Date.now();
-            const timeSinceLastSuccess = now - this.lastHeartbeatSuccess;
-
-            if (timeSinceLastSuccess > 3500) {
-                this.isConnected = false;
-            }
-
             this.sendReport();
         }, this.HEARTBEAT_INTERVAL_MS);
     }
@@ -263,7 +258,6 @@ export class WindowReporter implements vscode.Disposable {
 
         try {
             await this.sendRequest('/api/task/report', data);
-            this.isConnected = true;
             this.lastHeartbeatSuccess = Date.now();
         } catch (err) {
             // 静默失败，心跳会重试

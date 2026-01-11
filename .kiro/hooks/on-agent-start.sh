@@ -1,16 +1,12 @@
 #!/bin/bash
 # Kiro Hook: Agent Start - 当Kiro开始执行时通知Vibe Process Bar
 
-TASK_ID="kiro_$(date +%s)_$$"
+VIBE_API="http://localhost:31415"
+PROJECT_PATH="$(pwd)"
+IDE="kiro"
 
-curl -s -X POST "http://localhost:31415/api/task/start" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"task_id\": \"${TASK_ID}\",
-    \"name\": \"Kiro AI Task\",
-    \"ide\": \"kiro\",
-    \"window_title\": \"Kiro - AI Assistant\"
-  }" > /dev/null 2>&1
-
-# 保存task_id供后续使用
-echo "$TASK_ID" > /tmp/kiro_current_task_id
+if [ -n "$PROJECT_PATH" ]; then
+  curl -s -X POST "$VIBE_API/api/task/update_state_by_path" \
+    -H "Content-Type: application/json" \
+    -d "{\"project_path\": \"$PROJECT_PATH\", \"ide\": \"$IDE\", \"status\": \"running\", \"source\": \"hook\"}" > /dev/null 2>&1
+fi

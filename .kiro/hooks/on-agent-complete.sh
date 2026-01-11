@@ -1,13 +1,12 @@
 #!/bin/bash
-# Kiro Hook: Agent Complete - 当Kiro完成执行时通知Vibe Process Bar
+# Kiro Hook: Agent Complete - 当Kiro执行完成时通知Vibe Process Bar
 
-TASK_ID=$(cat /tmp/kiro_current_task_id 2>/dev/null || echo "kiro_unknown")
+VIBE_API="http://localhost:31415"
+PROJECT_PATH="$(pwd)"
+IDE="kiro"
 
-curl -s -X POST "http://localhost:31415/api/task/complete" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"task_id\": \"${TASK_ID}\",
-    \"total_tokens\": 0
-  }" > /dev/null 2>&1
-
-rm -f /tmp/kiro_current_task_id
+if [ -n "$PROJECT_PATH" ]; then
+  curl -s -X POST "$VIBE_API/api/task/update_state_by_path" \
+    -H "Content-Type: application/json" \
+    -d "{\"project_path\": \"$PROJECT_PATH\", \"ide\": \"$IDE\", \"status\": \"completed\", \"source\": \"hook\"}" > /dev/null 2>&1
+fi

@@ -49,8 +49,7 @@ export class AIActivityDetector implements vscode.Disposable {
     private readonly MIN_RUN_MS = 5000;
 
     constructor() {
-        outputChannel = vscode.window.createOutputChannel('AI Status Transmission');
-        outputChannel.show(true);
+        outputChannel = vscode.window.createOutputChannel('Vibe Process Bar');
         setOutputChannel(outputChannel);
 
         this.windowReporter = new WindowReporter();
@@ -73,7 +72,6 @@ export class AIActivityDetector implements vscode.Disposable {
         );
 
         log('Initialized');
-        vscode.window.showInformationMessage('AI Status Transmission: Detector initialized');
     }
 
     private handleFocusChange(focused: boolean): void {
@@ -182,7 +180,6 @@ export class AIActivityDetector implements vscode.Disposable {
 
         log('🤖 AI activity detected, starting task');
         this.windowReporter.updateTaskState('running');
-        vscode.window.showInformationMessage(`AI Task Started: ${this.windowReporter.getWindowTitle()}`);
 
         this.resetIdleTimer();
     }
@@ -190,7 +187,6 @@ export class AIActivityDetector implements vscode.Disposable {
     private completeTask(): void {
         log(`⏱️ Completing task: insert=${this.sessionInsert}, events=${this.sessionEvents}`);
         this.windowReporter.updateTaskState('completed');
-        vscode.window.showInformationMessage(`AI Task Completed: ${this.windowReporter.getWindowTitle()}`);
     }
 
     private getIdleTimeout(): number {

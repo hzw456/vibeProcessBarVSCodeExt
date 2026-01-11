@@ -21,28 +21,28 @@
   "contributes": {
     "commands": [
       {
-        "command": "aiStatusTransmission.start",
-        "title": "AI Status: Start"
+        "command": "vibeProcessBar.start",
+        "title": "Vibe Process Bar: Start"
       },
       {
-        "command": "aiStatusTransmission.status",
-        "title": "AI Status: Check Status"
+        "command": "vibeProcessBar.status",
+        "title": "Vibe Process Bar: Check Status"
       }
     ],
     "configuration": {
-      "title": "AI Status Transmission",
+      "title": "Vibe Process Bar",
       "properties": {
-        "aiStatusTransmission.endpoint": {
+        "vibeProcessBar.endpoint": {
           "type": "string",
           "default": "http://localhost:31415",
           "description": "Vibe Process Bar API endpoint"
         },
-        "aiStatusTransmission.charThreshold": {
+        "vibeProcessBar.charThreshold": {
           "type": "number",
           "default": 200,
           "description": "Character change threshold to detect AI activity"
         },
-        "aiStatusTransmission.idleTimeout": {
+        "vibeProcessBar.idleTimeout": {
           "type": "number",
           "default": 5000,
           "description": "Idle timeout in ms before completing task"

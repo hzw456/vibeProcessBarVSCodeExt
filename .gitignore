@@ -1,0 +1,26 @@
+out/
+node_modules/
+.DS_Store
+.vscode-test/
+*.vsix
+coverage/
+
+# AI Agent generated
+.gemini/
+.claude/
+.cursor/
+.clinerules/
+.kiro/
+.aider*
+.todo.md
+CLINE.md
+AGENTS.md
+*-monitor.js
+
+# IDE
+.idea/
+.vscode/
+*.local
+
+# OpenSpec (if not needed)
+# openspec/
