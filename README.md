@@ -22,30 +22,13 @@ When you use AI coding assistants (like GitHub Copilot, Cline, etc.) in VS Code,
 
 ## ✨ Core Features
 
-### 🤖 Smart AI Activity Detection
+### 🖥️ Base Core Capabilities
 
-The extension automatically identifies AI coding activity through multi-dimensional analysis:
+The core function of the extension is window management, focus detection, and heartbeat reporting.
 
-| Detection Dimension | Trigger Condition |
-|:---|:---|
-| 📝 Character Change | ≥ 200 characters modified within 3s |
-| 🔄 Change Frequency | At least 3 document changes within 3s |
-| 📁 Multi-file Operation | ≥ 2 files modified within 5s |
+### 🤖 AI Activity Detection
 
-**Fulfilling any two conditions triggers detection of AI activity.**
-
-### 🎯 Smart Tri-state Switching
-
-```
-┌─────────┐    Focus Lost     ┌─────────┐     AI Activity     ┌─────────┐
-│  IDLE   │ ────────────▶ │  ARMED  │ ─────────────────▶ │ RUNNING │
-│         │               │         │                    │         │
-└─────────┘               └─────────┘                    └─────────┘
-     ▲                         │                              │
-     │                         │ Focus Gained                 │ 5s Inactive
-     │                         ▼                              │
-     └─────────────────────────────────────────────────────────┘
-```
+The extension analyzes AI coding activity through several dimensions, but this detection may be inaccurate.
 
 ### 📡 Auto Status Sync
 
@@ -57,12 +40,11 @@ The extension automatically identifies AI coding activity through multi-dimensio
 
 ## 🚀 Installation
 
-### Method 1: VS Code Marketplace
+### Method 1: GitHub Release
 
-1. Open VS Code
-2. Press `Cmd/Ctrl + Shift + X` to open Extensions panel
-3. Search for **"Vibe Process Bar"**
-4. Click Install
+1. Visit the [Releases](https://github.com/hzw456/vibeProcessBarVSCodeExt/releases) page to download the latest `.vsix` file.
+2. Click the "..." menu in the VS Code Extensions panel.
+3. Select "Install from VSIX...".
 
 ### Method 2: Install from VSIX
 
