@@ -222,19 +222,19 @@ class AIActivityDetector {
         this.sendHeartbeat();
     }
     handleWindowStateChange(focused) {
-        log(`handleWindowStateChange: focused=${focused}, state = ${this.state}, aiRunning = ${this.aiRunning} `);
+        log(`handleWindowStateChange: focused=${focused}, state=${this.state}, aiRunning=${this.aiRunning}`);
         if (!focused) {
             // 窗口失去焦点 -> ARMED
             this.state = 'ARMED';
             this.aiRunning = false;
             this.resetSession();
-            this.sendArmedNotification();
+            this.sendReport(false); // is_focused=false
             log('Window lost focus, entering ARMED state');
         }
         else {
             // 窗口获得焦点 -> ACTIVE
             this.state = 'ACTIVE';
-            this.sendActiveNotification();
+            this.sendReport(true); // is_focused=true
             if (this.aiRunning) {
                 // 后台任务未结束，立即完成
                 this.completeTask();
@@ -288,13 +288,10 @@ class AIActivityDetector {
         }, this.HEARTBEAT_INTERVAL_MS);
     }
     async sendHeartbeat() {
-        // 根据当前状态发送对应的通知
-        if (this.state === 'ACTIVE') {
-            await this.sendActiveNotification();
-        }
-        else {
-            await this.sendArmedNotification();
-        }
+        // 使用统一的 report 接口进行心跳保活
+        // 发送当前焦点状态
+        const isFocused = this.state === 'ACTIVE';
+        await this.sendReport(isFocused);
     }
     handleDocumentChange(event) {
         // 仅当 state === ARMED 才处理
@@ -429,9 +426,8 @@ class AIActivityDetector {
             this.sendUpdateNotification();
         }, this.UPDATE_THROTTLE_MS);
     }
-    // === API Calls ===
-    async sendArmedNotification() {
-        // Skip reporting for empty windows (no file, no project, title is Untitled)
+    async sendReport(isFocused) {
+        // Skip reporting for empty windows
         this.activeFile = this.getActiveFileName();
         if (this.shouldSkipReporting()) {
             return;
@@ -442,159 +438,77 @@ class AIActivityDetector {
         }
         const data = {
             task_id: this.taskId,
-            name: `${this.getDisplayIdeName()} - ${this.windowTitle} `,
+            name: `${this.getDisplayIdeName()} - ${this.windowTitle}`,
             ide: this.ideName,
             window_title: this.windowTitle,
-            status: 'armed',
+            is_focused: isFocused,
             project_path: projectPath,
         };
         if (this.activeFile) {
             data.active_file = this.activeFile;
         }
-        log(`Sending ARMED notification: ${this.taskId}, active_file: ${this.activeFile} `);
+        log(`Sending REPORT: is_focused=${isFocused}, task_id=${this.taskId}`);
         try {
-            await this.sendRequest('/api/task/armed', data);
-            log(`✅ ARMED notification sent: ${this.taskId} `);
+            await this.sendRequest('/api/task/report', data);
+            log(`✅ REPORT sent: ${this.taskId}`);
         }
         catch (err) {
-            log(`❌ Failed to send ARMED notification: ${err} `);
-        }
-    }
-    async sendActiveNotification() {
-        // Skip reporting for empty windows (no file, no project, title is Untitled)
-        if (this.shouldSkipReporting()) {
-            return;
-        }
-        let projectPath = '';
-        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-            projectPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        }
-        const data = {
-            task_id: this.taskId,
-            name: `${this.getDisplayIdeName()} - ${this.windowTitle} `,
-            ide: this.ideName,
-            window_title: this.windowTitle,
-            status: 'active', // Explicit status
-            project_path: projectPath,
-        };
-        if (this.activeFile) {
-            data.active_file = this.activeFile;
-        }
-        log(`Sending ACTIVE notification: ${this.taskId}, active_file: ${this.activeFile || '(none)'} `);
-        try {
-            // Use 'armed' endpoint or 'active' - if 'active' endpoint doesn't support full restoration on server side, 
-            // we might want to use a unified endpoint or ensure server handles it.
-            // Assuming server handles full payload on /active as well or we use /armed for everything essentially.
-            // For now, let's stick to /active but send full data so server CAN use it if improved.
-            // Wait, if 404, we want to auto-register. 
-            // If the server implementation of /api/task/active requires the task to exist, these extra fields won't help unless the server is also updated.
-            // However, based on typical patterns, passing full info allows upsert. 
-            // If strictly needed, we could call /api/task/armed even for active state? 
-            // The prompt implies "Task not found", so the SERVER is rejecting it.
-            // Let's try sending full data to /api/task/active first.
-            await this.sendRequest('/api/task/active', data);
-            log(`✅ ACTIVE notification sent: ${this.taskId} `);
-        }
-        catch (err) {
-            log(`❌ Failed to send ACTIVE notification: ${err} `);
-            // If 404, maybe we should try to 'start' or 'arm' to register it?
-            if (err.message && err.message.includes('404')) {
-                log('⚠️ Task not found (404), attempting to re-register via ARMED...');
-                await this.sendArmedNotification();
-            }
+            log(`❌ Failed to send REPORT: ${err}`);
         }
     }
     async startTask() {
-        let projectPath = '';
-        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-            projectPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        }
         const data = {
             task_id: this.taskId,
-            name: `${this.getDisplayIdeName()} - ${this.windowTitle} `,
-            ide: this.ideName,
-            window_title: this.windowTitle,
-            project_path: projectPath,
+            status: 'running',
         };
-        if (this.activeFile) {
-            data.active_file = this.activeFile;
-        }
-        log(`Starting task: ${this.taskId}, active_file: ${this.activeFile || '(none)'} `);
+        log(`Starting task: ${this.taskId}`);
         try {
-            await this.sendRequest('/api/task/start', data);
-            log(`✅ Task started: ${this.taskId} `);
-            vscode.window.showInformationMessage(`AI Task Started: ${this.windowTitle} `);
+            await this.sendRequest('/api/task/update_state', data);
+            log(`✅ Task started: ${this.taskId}`);
+            vscode.window.showInformationMessage(`AI Task Started: ${this.windowTitle}`);
         }
         catch (err) {
-            log(`❌ Failed to start task: ${err} `);
+            log(`❌ Failed to start task: ${err}`);
         }
     }
     async completeTask() {
         const data = {
             task_id: this.taskId,
-            session_insert: this.sessionInsert,
-            session_events: this.sessionEvents,
+            status: 'completed',
         };
-        log(`Completing task: ${this.taskId} (session_insert = ${this.sessionInsert}, session_events = ${this.sessionEvents})`);
+        log(`Completing task: ${this.taskId} (session_insert=${this.sessionInsert}, session_events=${this.sessionEvents})`);
         try {
-            await this.sendRequest('/api/task/complete', data);
-            log(`✅ Task completed: ${this.taskId} `);
-            vscode.window.showInformationMessage(`AI Task Completed: ${this.windowTitle} `);
+            await this.sendRequest('/api/task/update_state', data);
+            log(`✅ Task completed: ${this.taskId}`);
+            vscode.window.showInformationMessage(`AI Task Completed: ${this.windowTitle}`);
         }
         catch (err) {
-            log(`❌ Failed to complete task: ${err} `);
+            log(`❌ Failed to complete task: ${err}`);
         }
     }
     async cancelTask() {
         const data = {
             task_id: this.taskId,
         };
-        log(`Cancelling task: ${this.taskId} `);
+        log(`Cancelling task: ${this.taskId}`);
         try {
-            await this.sendRequest('/api/task/cancel', data);
-            log(`✅ Task cancelled: ${this.taskId} `);
+            await this.sendRequest('/api/task/delete', data);
+            log(`✅ Task cancelled: ${this.taskId}`);
         }
         catch (err) {
-            log(`❌ Failed to cancel task: ${err} `);
+            log(`❌ Failed to cancel task: ${err}`);
         }
     }
     async updateActiveFile() {
-        if (!this.activeFile) {
-            return;
-        }
-        const data = {
-            task_id: this.taskId,
-            active_file: this.activeFile,
-        };
-        log(`Updating active file: ${this.activeFile} `);
-        try {
-            await this.sendRequest('/api/task/update', data);
-            log(`✅ Active file updated: ${this.activeFile} `);
-        }
-        catch (err) {
-            log(`❌ Failed to update active file: ${err} `);
-        }
+        // Active file updates are now handled via report
+        log(`Active file updated locally: ${this.activeFile}`);
     }
     async sendUpdateNotification() {
-        // Skip reporting for empty windows (no file, no project, title is Untitled)
+        // Progress updates during AI activity - send via report to keep task alive
         if (this.shouldSkipReporting()) {
             return;
         }
-        const data = {
-            task_id: this.taskId,
-            session_insert: this.sessionInsert,
-            session_events: this.sessionEvents,
-        };
-        if (this.activeFile) {
-            data.active_file = this.activeFile;
-        }
-        log(`Sending UPDATE: sessionInsert = ${this.sessionInsert}, sessionEvents = ${this.sessionEvents} `);
-        try {
-            await this.sendRequest('/api/task/update', data);
-        }
-        catch (err) {
-            log(`❌ Failed to send update: ${err} `);
-        }
+        log(`Update notification: sessionInsert=${this.sessionInsert}, sessionEvents=${this.sessionEvents}`);
     }
     sendRequest(endpoint, data) {
         return new Promise((resolve, reject) => {
@@ -652,16 +566,48 @@ class AIActivityDetector {
         this.clearSessionTimers();
         this.clearHeartbeatTimer();
         if (this.aiRunning) {
+            // Note: completeTask is async but we can't await in dispose
             this.completeTask();
         }
         // Always cancel task on dispose to clean up, regardless of state
         // This ensures the old task is removed when window reloads
-        this.cancelTask();
+        // Use SYNCHRONOUS request to ensure it completes before process exits
+        this.cancelTaskSync();
         this.disposables.forEach(d => d.dispose());
         if (outputChannel) {
             outputChannel.dispose();
         }
         log('AIActivityDetector disposed');
+    }
+    /**
+     * Synchronously cancel task - used in dispose() to ensure cleanup completes
+     * before the extension host process exits
+     */
+    cancelTaskSync() {
+        const data = JSON.stringify({ task_id: this.taskId });
+        log(`Cancelling task (sync): ${this.taskId}`);
+        try {
+            const http = require('http');
+            const req = http.request({
+                hostname: '127.0.0.1',
+                port: 31415,
+                path: '/api/task/delete',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(data)
+                },
+                timeout: 1000
+            });
+            // Write and end synchronously - the request will be sent
+            // Even if we don't wait for response, the server will process it
+            req.write(data);
+            req.end();
+            log(`✅ Task cancel request sent (sync): ${this.taskId}`);
+        }
+        catch (err) {
+            log(`❌ Failed to cancel task (sync): ${err.message}`);
+        }
     }
 }
 exports.AIActivityDetector = AIActivityDetector;
