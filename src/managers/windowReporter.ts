@@ -267,11 +267,26 @@ export class WindowReporter implements vscode.Disposable {
     private sendRequest(endpoint: string, data: any): Promise<void> {
         return new Promise((resolve, reject) => {
             const postData = JSON.stringify(data);
-            const http = require('http');
+            
+            // 读取用户配置的 endpoint
+            const config = vscode.workspace.getConfiguration('vibeProcessBar');
+            const baseEndpoint = config.get<string>('endpoint', 'http://localhost:31415');
+            
+            // 解析 URL
+            let url: URL;
+            try {
+                url = new URL(baseEndpoint);
+            } catch {
+                url = new URL('http://localhost:31415');
+            }
+            
+            const isHttps = url.protocol === 'https:';
+            const httpModule = isHttps ? require('https') : require('http');
+            const defaultPort = isHttps ? 443 : 80;
 
-            const req = http.request({
-                hostname: '127.0.0.1',
-                port: 31415,
+            const req = httpModule.request({
+                hostname: url.hostname,
+                port: url.port || defaultPort,
                 path: endpoint,
                 method: 'POST',
                 headers: {
@@ -307,10 +322,24 @@ export class WindowReporter implements vscode.Disposable {
         log(`Deleting task (sync): ${this.taskId}`);
 
         try {
-            const http = require('http');
-            const req = http.request({
-                hostname: '127.0.0.1',
-                port: 31415,
+            // 读取用户配置的 endpoint
+            const config = vscode.workspace.getConfiguration('vibeProcessBar');
+            const baseEndpoint = config.get<string>('endpoint', 'http://localhost:31415');
+            
+            let url: URL;
+            try {
+                url = new URL(baseEndpoint);
+            } catch {
+                url = new URL('http://localhost:31415');
+            }
+            
+            const isHttps = url.protocol === 'https:';
+            const httpModule = isHttps ? require('https') : require('http');
+            const defaultPort = isHttps ? 443 : 80;
+
+            const req = httpModule.request({
+                hostname: url.hostname,
+                port: url.port || defaultPort,
                 path: '/api/task/delete',
                 method: 'POST',
                 headers: {
