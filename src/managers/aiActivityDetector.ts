@@ -85,17 +85,12 @@ export class AIActivityDetector implements vscode.Disposable {
             log('Entering ARMED state');
         } else {
             // 窗口获得焦点 -> ACTIVE
+            // 注意：不再自动将任务标记为 completed
+            // 任务状态保持不变，由用户双击任务时手动重置
             this.state = 'ACTIVE';
-
-            if (this.aiRunning) {
-                this.completeTask();
-                this.aiRunning = false;
-                log('Task completed on focus');
-            }
-
             this.clearIdleTimer();
             this.recentInserts = [];
-            log('Entering ACTIVE state');
+            log('Entering ACTIVE state (no auto status change)');
         }
     }
 
