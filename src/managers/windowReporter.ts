@@ -94,7 +94,6 @@ export class WindowReporter implements vscode.Disposable {
         this.isFocused = focused;
 
         log(`Focus changed: ${wasFocused} -> ${focused}`);
-        this.sendReport();
 
         // 通知回调
         if (this.onFocusChangeCallback) {
